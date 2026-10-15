@@ -1,1 +1,0 @@
-# AI-hand_gesture-box-
