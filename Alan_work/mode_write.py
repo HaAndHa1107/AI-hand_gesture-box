@@ -1,5 +1,8 @@
 import cv2
 import numpy as np
+import shutil
+import subprocess
+import time
 
 from config import COLOR_GREEN
 
@@ -15,6 +18,8 @@ class WriteController:
         self.preview_w = 520
         self.preview_h = 300
         self.preview_open = False
+        self.preview_visible = False
+        self._last_raise = 0.0
 
     def reset(self, w, h):
         self.canvas = np.zeros(
@@ -99,59 +104,52 @@ class WriteController:
 
         return cv2.add(base, self.canvas)
 
+    def _raise_preview(self):
+        """Try to bring the preview above Chromium without taking keyboard focus."""
+        try:
+            cv2.setWindowProperty(self.preview_name, cv2.WND_PROP_TOPMOST, 1)
+        except cv2.error:
+            pass
+
+        # Optional X11 fallback; runs automatically when xdotool is available.
+        if shutil.which("xdotool"):
+            try:
+                result = subprocess.run(
+                    ["xdotool", "search", "--name", "^Handwriting Preview$"],
+                    capture_output=True, text=True, timeout=0.4,
+                )
+                ids = result.stdout.split()
+                if ids:
+                    subprocess.run(
+                        ["xdotool", "windowmap", ids[-1]],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=0.4,
+                    )
+                    subprocess.run(
+                        ["xdotool", "windowraise", ids[-1]],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=0.4,
+                    )
+            except (OSError, subprocess.SubprocessError):
+                pass
+
     def open_preview(self, screen_w, screen_h):
-        """
-        每次進入手寫模式都能開啟預覽
-        """
+        """Create once, and bring back the same window on every entry."""
+        if not self.preview_open:
+            cv2.namedWindow(self.preview_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(self.preview_name, self.preview_w, self.preview_h)
+            self.preview_open = True
 
-        if self.preview_open:
-            return
-
-        cv2.namedWindow(
-            self.preview_name,
-            cv2.WINDOW_NORMAL
-        )
-
-        cv2.resizeWindow(
-            self.preview_name,
-            self.preview_w,
-            self.preview_h
-        )
-
-        self.preview_open = True
-
-        self._position_preview(
-            screen_w,
-            screen_h
-        )
+        self.preview_visible = True
+        self._position_preview(screen_w, screen_h)
+        self._raise_preview()
+        self._last_raise = time.monotonic()
 
     def _position_preview(self, screen_w, screen_h):
         margin = 25
-
-        x = max(
-            0,
-            screen_w - self.preview_w - margin
-        )
-
-        y = max(
-            0,
-            screen_h - self.preview_h - margin - 40
-        )
-
-        cv2.moveWindow(
-            self.preview_name,
-            x,
-            y
-        )
-
-        try:
-            cv2.setWindowProperty(
-                self.preview_name,
-                cv2.WND_PROP_TOPMOST,
-                1
-            )
-        except cv2.error:
-            pass
+        x = max(0, screen_w - self.preview_w - margin)
+        y = max(0, screen_h - self.preview_h - margin - 40)
+        cv2.moveWindow(self.preview_name, x, y)
 
     def show_preview(
         self,
@@ -163,11 +161,8 @@ class WriteController:
         每一幀更新右下角筆跡
         """
 
-        if not self.preview_open:
-            self.open_preview(
-                screen_w,
-                screen_h
-            )
+        if not self.preview_visible:
+            self.open_preview(screen_w, screen_h)
 
         preview = np.full(
             (self.preview_h, self.preview_w, 3),
@@ -249,21 +244,24 @@ class WriteController:
             preview
         )
 
+        # Reassert stacking periodically in case Chromium raises itself.
+        if time.monotonic() - self._last_raise > 2.0:
+            self._raise_preview()
+            self._last_raise = time.monotonic()
+
     def close_preview(self):
-        """
-        每次離開手寫模式就關閉
-        下次進入可以重新建立
-        """
-
-        if self.preview_open:
-            try:
-                cv2.destroyWindow(
-                    self.preview_name
-                )
-            except cv2.error:
-                pass
-
-        self.preview_open = False
+        """Hide without destroying the native window (safe to re-enter)."""
+        if not self.preview_open:
+            return
+        self.preview_visible = False
+        try:
+            cv2.setWindowProperty(self.preview_name, cv2.WND_PROP_TOPMOST, 0)
+        except cv2.error:
+            pass
+        try:
+            cv2.moveWindow(self.preview_name, -2000, -2000)
+        except cv2.error:
+            pass
 
     def encoded_canvas(self):
         if (

@@ -31,8 +31,17 @@ if sys.version_info < (3, 9):
 
 os.environ["FLAGS_selected_gpus"] = "0"
 
-SCREEN_W = 2560
-SCREEN_H = 1440
+# 自動使用目前桌面的輸出解析度（需先讓電視與桌面正確設定解析度）
+# 若無法取得桌面大小，回退至原本的 2560x1440 設定。
+try:
+    SCREEN_W, SCREEN_H = map(int, pyautogui.size())
+    if SCREEN_W <= 0 or SCREEN_H <= 0:
+        raise ValueError("無效的桌面解析度")
+except Exception as exc:
+    print(f">>> [Display] 無法自動偵測解析度：{exc}，使用 2560x1440")
+    SCREEN_W, SCREEN_H = 2560, 1440
+
+print(f">>> [Display] 桌面解析度：{SCREEN_W}x{SCREEN_H}")
 
 CHROMIUM_CMD = (
     "chromium-browser"
@@ -148,28 +157,34 @@ class InteractiveTile:
                     -1
                 )
 
-        text_x = self.x1 + 18
-        text_y = (
-            self.y1
-            + int((self.y2 - self.y1) / 2)
-            + 10
-        )
+        # 按鈕文字延後到螢幕原生解析度繪製，避免放大模糊。
 
-        display_text = (
-            "LOADING..."
-            if self.is_clicked
-            else self.title
-        )
 
-        cv2.putText(
-            img,
-            display_text,
-            (text_x, text_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.75,
-            (255, 255, 255),
-            2
-        )
+def draw_menu_text_hd(image, tiles, source_w, source_h):
+    """主選單文字在目前桌面輸出解析度上重新繪製。"""
+    sx = image.shape[1] / source_w
+    sy = image.shape[0] / source_h
+    scale = min(sx, sy)
+    thickness = max(2, round(2 * scale))
+
+    cv2.putText(image, "TV LAUNCHER",
+                (round(40 * sx), round(50 * sy)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8 * scale,
+                (200, 200, 200), thickness, cv2.LINE_AA)
+
+    for tile in tiles:
+        label = "LOADING..." if tile.is_clicked else tile.title
+        cv2.putText(image, label,
+                    (round((tile.x1 + 18) * sx),
+                     round((tile.y1 + (tile.y2 - tile.y1) / 2 + 10) * sy)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75 * scale,
+                    (255, 255, 255), thickness, cv2.LINE_AA)
+
+    cv2.putText(image, "Hover or Pinch to Select",
+                (round(40 * sx), round(320 * sy)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6 * scale,
+                COLOR_YELLOW, thickness, cv2.LINE_AA)
+
 
 
 if __name__ == "__main__":
@@ -272,7 +287,7 @@ if __name__ == "__main__":
     current_state = STATE_MENU
     last_cmd_time = 0
     is_locked = True
-    prev_click_state = False
+    menu_click_held = False
 
     palm_hold_start_time = None
     PALM_REQUIRED_DURATION = 1.2
@@ -302,6 +317,8 @@ if __name__ == "__main__":
     fps_time = time.time()
     fps_counter = 0
     current_fps = 0
+
+    last_overlay_update = 0.0
 
     try:
         while cap.isOpened():
@@ -418,6 +435,7 @@ if __name__ == "__main__":
                 if not tv_ctrl.is_tv_on:
                     current_state = STATE_MENU
                     ocr_pending = False
+                    browser.hide_handwriting_overlay()
                     writer.close_preview()
                     browser.close()
 
@@ -442,16 +460,6 @@ if __name__ == "__main__":
                         -1
                     )
 
-                    cv2.putText(
-                        display_frame,
-                        "TV LAUNCHER",
-                        (40, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.8,
-                        (200, 200, 200),
-                        2
-                    )
-
                     for tile in tiles:
                         tile.update_state(
                             cursor_x,
@@ -463,15 +471,6 @@ if __name__ == "__main__":
                             now
                         )
 
-                    cv2.putText(
-                        display_frame,
-                        "Hover or Pinch to Select",
-                        (40, 320),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        COLOR_YELLOW,
-                        2
-                    )
 
                 if has_hand:
 
@@ -527,26 +526,34 @@ if __name__ == "__main__":
 
                             palm_hold_start_time = None
 
-                            dist_pinch = (
-                                get_dist(lm[4], lm[8])
-                                if 4 in lm and 8 in lm
-                                else 999
+                            # 主選單點擊：食指指尖(8)靠近掌根(0)
+                            # 與 mode_mouse.py 使用相同的比例及遲滯門檻
+                            palm_size = max(
+                                get_dist(lm[5], lm[17]),
+                                get_dist(lm[0], lm[9]),
+                                1.0
                             )
-
-                            dist_im = (
-                                get_dist(lm[8], lm[12])
-                                if 8 in lm and 12 in lm
-                                else 999
+                            index_wrist_ratio = (
+                                get_dist(lm[8], lm[0]) / palm_size
                             )
-
-                            is_gesture_click = (
-                                dist_pinch < 65
-                                or dist_im < 60
-                                or gestures.get(
-                                    "click",
-                                    False
+                            click_blocked = any(
+                                gestures.get(name, False)
+                                for name in (
+                                    "mode_switch", "ok", "lock_sign",
+                                    "palm", "eraser", "three_up"
                                 )
                             )
+                            if menu_click_held:
+                                is_gesture_click = False
+                                if index_wrist_ratio >= 1.65:
+                                    menu_click_held = False
+                            else:
+                                is_gesture_click = (
+                                    not click_blocked
+                                    and index_wrist_ratio <= 1.35
+                                )
+                                if is_gesture_click:
+                                    menu_click_held = True
 
                             trigger_tile = None
 
@@ -583,6 +590,8 @@ if __name__ == "__main__":
                                     display_frame,
                                     (SCREEN_W, SCREEN_H)
                                 )
+
+                                draw_menu_text_hd(temp_display, tiles, w, h)
 
                                 cv2.imshow(
                                     window_name,
@@ -647,7 +656,7 @@ if __name__ == "__main__":
 
                                 switch_armed = False
                                 last_cmd_time = now
-                                writer.close_preview()
+                                browser.hide_handwriting_overlay()
                                 print(
                                     ">>> [模式] 返回滑鼠模式"
                                 )
@@ -748,7 +757,6 @@ if __name__ == "__main__":
                                 writer.reset(w, h)
 
                                 write_ready_at = now + 0.45
-                                prev_click_state = False
                                 switch_armed = False
 
                                 # 只讓手寫預覽置頂，不讓整個主視窗蓋住瀏覽器
@@ -759,8 +767,7 @@ if __name__ == "__main__":
                                 )
 
                                 # 每次進入手寫模式都重新開啟預覽
-                                writer.close_preview()
-                                writer.open_preview(SCREEN_W, SCREEN_H)
+                                browser.show_handwriting_overlay(writer.canvas)
 
                                 last_cmd_time = now
 
@@ -788,38 +795,6 @@ if __name__ == "__main__":
                                     h,
                                     display_frame
                                 )
-
-                                dist_pinch = (
-                                    get_dist(
-                                        lm[4],
-                                        lm[8]
-                                    )
-                                    if 4 in lm and 8 in lm
-                                    else 999
-                                )
-
-                                dist_im = (
-                                    get_dist(
-                                        lm[8],
-                                        lm[12]
-                                    )
-                                    if 8 in lm and 12 in lm
-                                    else 999
-                                )
-
-                                is_clicking = (
-                                    not gestures.get(
-                                        "mode_switch"
-                                    )
-                                    and (
-                                        dist_pinch < 65
-                                        or dist_im < 60
-                                    )
-                                )
-
-                                # MouseController 負責點擊
-                                # 避免 main.py 重複點擊
-                                prev_click_state = is_clicking
 
                             # =====================================
                             # 張開手掌返回主選單
@@ -892,7 +867,7 @@ if __name__ == "__main__":
                 else:
                     # 沒有偵測到手
                     palm_hold_start_time = None
-                    prev_click_state = False
+                    menu_click_held = False
 
                     if current_state == STATE_WRITE:
                         writer.last_point = None
@@ -960,11 +935,30 @@ if __name__ == "__main__":
 
             # 即使沒有偵測到手，也持續更新右下角手寫預覽
             if tv_ctrl.is_tv_on and current_state == STATE_WRITE:
-                writer.show_preview(
-                    SCREEN_W,
-                    SCREEN_H,
-                    recognizing=ocr_pending
-                )
+                # 直接更新 Chromium 頁面內的預覽，不使用 OpenCV 子視窗
+                if now - last_overlay_update >= 0.15:
+                    # 食指第 8 點的位置；停筆時仍顯示游標，但不新增筆跡。
+                    cursor = None
+                    if has_hand and 8 in lm:
+                        cursor = (
+                            max(0.0, min(1.0, lm[8][0] / max(w, 1))),
+                            max(0.0, min(1.0, lm[8][1] / max(h, 1)))
+                        )
+                    pen_down = bool(
+                        cursor is not None
+                        and gestures.get("index_up", False)
+                        and not gestures.get("middle_up", False)
+                        and not any(gestures.get(g, False) for g in
+                                    ("mode_switch", "ok", "backspace", "three_up", "eraser"))
+                        and not ocr_pending
+                    )
+                    browser.show_handwriting_overlay(
+                        writer.canvas,
+                        recognizing=ocr_pending,
+                        cursor=cursor,
+                        pen_down=pen_down
+                    )
+                    last_overlay_update = now
 
             # =====================================
             # 畫面輸出
@@ -973,6 +967,9 @@ if __name__ == "__main__":
                 display_frame,
                 (SCREEN_W, SCREEN_H)
             )
+
+            if tv_ctrl.is_tv_on and current_state == STATE_MENU:
+                draw_menu_text_hd(fullscreen_display, tiles, w, h)
 
             cv2.imshow(
                 window_name,
@@ -984,6 +981,7 @@ if __name__ == "__main__":
 
     finally:
 
+        browser.hide_handwriting_overlay()
         browser.close()
 
         try:
