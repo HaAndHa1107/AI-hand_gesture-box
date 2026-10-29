@@ -20,6 +20,8 @@ class WriteController:
         self.preview_open = False
         self.preview_visible = False
         self._last_raise = 0.0
+        self.canvas_version = 0
+        self.smooth_point = None
 
     def reset(self, w, h):
         self.canvas = np.zeros(
@@ -28,6 +30,8 @@ class WriteController:
         )
         self.last_point = None
         self.has_strokes = False
+        self.smooth_point = None
+        self.canvas_version += 1
 
     def clear_canvas(self):
         if self.canvas is not None:
@@ -35,6 +39,8 @@ class WriteController:
 
         self.last_point = None
         self.has_strokes = False
+        self.smooth_point = None
+        self.canvas_version += 1
 
     def process(self, gestures, lm, w, h, frame):
         if (
@@ -45,6 +51,7 @@ class WriteController:
 
         if not lm:
             self.last_point = None
+            self.smooth_point = None
             return
 
         # 以下手勢都不能產生筆跡
@@ -57,6 +64,7 @@ class WriteController:
 
         if any(gestures.get(g, False) for g in special):
             self.last_point = None
+            self.smooth_point = None
             return
 
         if gestures.get("eraser", False):
@@ -69,7 +77,16 @@ class WriteController:
             and not gestures.get("middle_up", False)
             and 8 in lm
         ):
-            point = lm[8]
+            raw_point = lm[8]
+            if self.smooth_point is None:
+                self.smooth_point = (float(raw_point[0]), float(raw_point[1]))
+            else:
+                alpha = 0.72  # 輕度平滑，優先保留跟手性
+                self.smooth_point = (
+                    alpha * raw_point[0] + (1 - alpha) * self.smooth_point[0],
+                    alpha * raw_point[1] + (1 - alpha) * self.smooth_point[1]
+                )
+            point = (round(self.smooth_point[0]), round(self.smooth_point[1]))
 
             if self.last_point is not None:
                 cv2.line(
@@ -81,6 +98,7 @@ class WriteController:
                     cv2.LINE_AA
                 )
                 self.has_strokes = True
+                self.canvas_version += 1
 
             self.last_point = point
 
@@ -93,6 +111,7 @@ class WriteController:
             )
         else:
             self.last_point = None
+            self.smooth_point = None
 
     def overlay(self, frame):
         if self.canvas is None:

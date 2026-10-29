@@ -67,3 +67,8 @@ def analyze_hand_gestures(lm, base):
         "fist": is_fist,
         "mouse_click": is_mouse_left_click
     }
+
+def index_wrist_click_ratio(lm):
+    """食指指尖(8)與掌根(0)距離除以手掌尺寸，供主選單及滑鼠共用。"""
+    palm_size = max(get_dist(lm[5], lm[17]), get_dist(lm[0], lm[9]), 1.0)
+    return get_dist(lm[8], lm[0]) / palm_size

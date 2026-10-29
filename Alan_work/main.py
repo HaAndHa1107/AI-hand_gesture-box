@@ -1,22 +1,23 @@
 import os
 import sys
-import shutil
 import cv2
 import mediapipe as mp
 import pyautogui
-import numpy as np
 import time
 import subprocess
 import multiprocessing as mp_process
 
 from config import *
-from utils import get_dist, draw_chinese_text
-from gesture_engine import analyze_hand_gestures
+from utils import get_dist
+from gesture_engine import analyze_hand_gestures, index_wrist_click_ratio
 from mode_mouse import MouseController
 from tv_manager import TVManager
 from mode_write import WriteController
 from ocr_process import ocr_worker
 from browser_input import BrowserInput
+from menu_ui import InteractiveTile, draw_menu_text_hd
+from chromium_launcher import launch_kiosk
+from browser_navigation import BrowserBackGesture
 
 # Raspberry Pi 5 圖形介面
 os.environ["DISPLAY"] = ":0.0"
@@ -43,148 +44,9 @@ except Exception as exc:
 
 print(f">>> [Display] 桌面解析度：{SCREEN_W}x{SCREEN_H}")
 
-CHROMIUM_CMD = (
-    "chromium-browser"
-    if shutil.which("chromium-browser")
-    else "chromium"
-)
-
 STATE_MENU = 0
-STATE_MOUSE = 1
 STATE_STREAMING = 3
 STATE_WRITE = 4
-
-
-def launch_kiosk(url):
-    """啟動 Chromium Kiosk"""
-    env = os.environ.copy()
-    env["DISPLAY"] = ":0.0"
-
-    subprocess.Popen([
-        CHROMIUM_CMD,
-        "--kiosk",
-        "--remote-debugging-port=9222",
-        "--remote-allow-origins=*",
-        "--user-data-dir=/tmp/smart-tv-chromium",
-        "--noerrdialogs",
-        "--disable-infobars",
-        "--no-first-run",
-        "--fast",
-        "--fast-start",
-        "--disable-features=TranslateUI",
-        url
-    ], env=env)
-
-
-class InteractiveTile:
-    """主選單按鈕"""
-
-    def __init__(
-        self, title, x1, y1, x2, y2,
-        color, hover_color, url
-    ):
-        self.title = title
-        self.x1 = x1
-        self.y1 = y1
-        self.x2 = x2
-        self.y2 = y2
-        self.color = color
-        self.hover_color = hover_color
-        self.url = url
-
-        self.is_hovered = False
-        self.is_clicked = False
-        self.hover_start_time = None
-
-    def update_state(self, cx, cy, now):
-        inside = (
-            cx is not None
-            and cy is not None
-            and self.x1 <= cx <= self.x2
-            and self.y1 <= cy <= self.y2
-        )
-
-        if inside:
-            if not self.is_hovered:
-                self.is_hovered = True
-                self.hover_start_time = now
-        else:
-            self.is_hovered = False
-            self.hover_start_time = None
-            self.is_clicked = False
-
-        return self.is_hovered
-
-    def draw(self, img, now):
-        if self.is_clicked:
-            cur_color = (0, 200, 0)
-        elif self.is_hovered:
-            cur_color = self.hover_color
-        else:
-            cur_color = self.color
-
-        cv2.rectangle(
-            img,
-            (self.x1, self.y1),
-            (self.x2, self.y2),
-            cur_color,
-            -1
-        )
-
-        if self.is_hovered or self.is_clicked:
-            cv2.rectangle(
-                img,
-                (self.x1 - 4, self.y1 - 4),
-                (self.x2 + 4, self.y2 + 4),
-                (255, 255, 255),
-                5
-            )
-
-            if self.hover_start_time:
-                progress = min(
-                    1.0,
-                    (now - self.hover_start_time) / 1.0
-                )
-                bar_w = int(
-                    (self.x2 - self.x1) * progress
-                )
-
-                cv2.rectangle(
-                    img,
-                    (self.x1, self.y2 - 6),
-                    (self.x1 + bar_w, self.y2),
-                    (0, 255, 0),
-                    -1
-                )
-
-        # 按鈕文字延後到螢幕原生解析度繪製，避免放大模糊。
-
-
-def draw_menu_text_hd(image, tiles, source_w, source_h):
-    """主選單文字在目前桌面輸出解析度上重新繪製。"""
-    sx = image.shape[1] / source_w
-    sy = image.shape[0] / source_h
-    scale = min(sx, sy)
-    thickness = max(2, round(2 * scale))
-
-    cv2.putText(image, "TV LAUNCHER",
-                (round(40 * sx), round(50 * sy)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8 * scale,
-                (200, 200, 200), thickness, cv2.LINE_AA)
-
-    for tile in tiles:
-        label = "LOADING..." if tile.is_clicked else tile.title
-        cv2.putText(image, label,
-                    (round((tile.x1 + 18) * sx),
-                     round((tile.y1 + (tile.y2 - tile.y1) / 2 + 10) * sy)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.75 * scale,
-                    (255, 255, 255), thickness, cv2.LINE_AA)
-
-    cv2.putText(image, "Hover or Pinch to Select",
-                (round(40 * sx), round(320 * sy)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6 * scale,
-                COLOR_YELLOW, thickness, cv2.LINE_AA)
-
 
 
 if __name__ == "__main__":
@@ -220,6 +82,7 @@ if __name__ == "__main__":
     tv_ctrl = TVManager()
     writer = WriteController()
     browser = BrowserInput()
+    browser_back = BrowserBackGesture()
 
     # =====================================
     # OCR 背景程序
@@ -528,14 +391,7 @@ if __name__ == "__main__":
 
                             # 主選單點擊：食指指尖(8)靠近掌根(0)
                             # 與 mode_mouse.py 使用相同的比例及遲滯門檻
-                            palm_size = max(
-                                get_dist(lm[5], lm[17]),
-                                get_dist(lm[0], lm[9]),
-                                1.0
-                            )
-                            index_wrist_ratio = (
-                                get_dist(lm[8], lm[0]) / palm_size
-                            )
+                            index_wrist_ratio = index_wrist_click_ratio(lm)
                             click_blocked = any(
                                 gestures.get(name, False)
                                 for name in (
@@ -610,6 +466,7 @@ if __name__ == "__main__":
                                 )
 
                                 current_state = STATE_STREAMING
+                                browser_back.reset()
                                 last_cmd_time = now
 
                         # =====================================
@@ -767,7 +624,7 @@ if __name__ == "__main__":
                                 )
 
                                 # 每次進入手寫模式都重新開啟預覽
-                                browser.show_handwriting_overlay(writer.canvas)
+                                browser.show_handwriting_overlay(writer.canvas, canvas_version=writer.canvas_version)
 
                                 last_cmd_time = now
 
@@ -796,10 +653,16 @@ if __name__ == "__main__":
                                     display_frame
                                 )
 
+                            # 網頁返回手勢交由 browser_navigation.py 處理。
+                            # 揮動後暫停長按手掌計時，直到手掌收起。
+                            did_go_back = browser_back.update(gestures, lm, w, now)
+                            if did_go_back or browser_back.block_palm_hold:
+                                palm_hold_start_time = None
+
                             # =====================================
-                            # 張開手掌返回主選單
+                            # 張開手掌返回主選單（原有功能保留）
                             # =====================================
-                            if gestures.get("palm"):
+                            if gestures.get("palm") and not browser_back.block_palm_hold:
 
                                 if palm_hold_start_time is None:
                                     palm_hold_start_time = now
@@ -866,11 +729,13 @@ if __name__ == "__main__":
 
                 else:
                     # 沒有偵測到手
+                    browser_back.reset()
                     palm_hold_start_time = None
                     menu_click_held = False
 
                     if current_state == STATE_WRITE:
                         writer.last_point = None
+                        writer.smooth_point = None
 
                 # =====================================
                 # OCR 結果處理
@@ -936,7 +801,7 @@ if __name__ == "__main__":
             # 即使沒有偵測到手，也持續更新右下角手寫預覽
             if tv_ctrl.is_tv_on and current_state == STATE_WRITE:
                 # 直接更新 Chromium 頁面內的預覽，不使用 OpenCV 子視窗
-                if now - last_overlay_update >= 0.15:
+                if now - last_overlay_update >= 0.065:
                     # 食指第 8 點的位置；停筆時仍顯示游標，但不新增筆跡。
                     cursor = None
                     if has_hand and 8 in lm:
@@ -956,7 +821,8 @@ if __name__ == "__main__":
                         writer.canvas,
                         recognizing=ocr_pending,
                         cursor=cursor,
-                        pen_down=pen_down
+                        pen_down=pen_down,
+                        canvas_version=writer.canvas_version
                     )
                     last_overlay_update = now
 

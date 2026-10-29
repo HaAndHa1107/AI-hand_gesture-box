@@ -16,6 +16,8 @@ class BrowserInput:
         self.ws = None
         self.target_id = None
         self.seq = 0
+        self._overlay_version = None
+        self._overlay_image = None
 
     def close(self):
         if self.ws:
@@ -26,6 +28,8 @@ class BrowserInput:
 
         self.ws = None
         self.target_id = None
+        self._overlay_version = None
+        self._overlay_image = None
 
     def _connect(self):
         if websocket is None:
@@ -268,15 +272,22 @@ class BrowserInput:
         )
 
         return down and char and up
-    def show_handwriting_overlay(self, canvas, recognizing=False, cursor=None, pen_down=False):
+    def show_handwriting_overlay(self, canvas, recognizing=False, cursor=None, pen_down=False, canvas_version=None):
         """在 Chromium 頁面右下角顯示預覽，不建立 OpenCV 視窗。"""
         if canvas is None:
             return False
-        image = cv2.resize(canvas, (472, 192), interpolation=cv2.INTER_AREA)
-        ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        if not ok:
-            return False
-        data_uri = "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii")
+        # 只有畫布內容改變才重新編碼 JPEG；游標更新不需要傳整張圖片。
+        if canvas_version is None or self._overlay_version != canvas_version or self._overlay_image is None:
+            image = cv2.resize(canvas, (472, 192), interpolation=cv2.INTER_AREA)
+            ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            if not ok:
+                return False
+            self._overlay_image = "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii")
+            self._overlay_version = canvas_version
+            image_changed = True
+        else:
+            image_changed = False
+        data_uri = self._overlay_image if image_changed else None
         status = "RECOGNIZING..." if recognizing else "INDEX: WRITE  |  TWO FINGERS: LIFT  |  OK: OCR"
         # 座標是相對於手寫畫布的 0~1 比例，避免因畫面縮放而偏移。
         cursor_data = None
@@ -307,7 +318,7 @@ class BrowserInput:
           panel.style.setProperty('display','block','important');
           const drawing = panel.children[1];
           const img = drawing.querySelector('img');
-          if (img) img.src = DATA_URI;
+          if (img && DATA_URI) img.src = DATA_URI;
           let pointer = document.getElementById('__smart_tv_pen_cursor__');
           // 相容已存在的舊版預覽面板：重新補上游標。
           if (!pointer) {
@@ -330,8 +341,14 @@ class BrowserInput:
           return true;
         })()""".replace("DATA_URI", json.dumps(data_uri)).replace("STATUS", json.dumps(status)).replace("CURSOR", json.dumps(cursor_data)).replace("PEN_DOWN", "true" if pen_down else "false")
         result = self.call("Runtime.evaluate", {"expression": js, "returnByValue": True})
-        return bool(result and result.get("result", {}).get("result", {}).get("value") is True)
+        success = bool(result and result.get("result", {}).get("result", {}).get("value") is True)
+        if not success:
+            self._overlay_version = None
+            self._overlay_image = None
+        return success
 
     def hide_handwriting_overlay(self):
         js = """(() => {const p=document.getElementById('__smart_tv_handwriting_preview__');if(p){p.remove();}return true;})()"""
+        self._overlay_version = None
+        self._overlay_image = None
         return self.call("Runtime.evaluate", {"expression": js, "returnByValue": True}) is not None

@@ -1,34 +1,33 @@
 import os
-import sys
 import cv2
 import numpy as np
 
-import onnxruntime as ort
-opts = ort.SessionOptions()
-opts.intra_op_num_threads = 1
-opts.inter_op_num_threads = 1
 
 def ocr_worker(input_queue, output_queue):
     print(">>> [子進程] 🚀 啟動純微軟 ONNX Runtime 旗艦引擎...")
     
-    dict_path = "models/ppocr_keys_v1.txt"
-    if not os.path.exists(dict_path):
-        return
-        
-    with open(dict_path, "r", encoding="utf-8") as f:
-        char_list = [line.strip() for line in f.readlines()]
-    char_list = ["blank"] + char_list + [" "]
-
-    try:
-        onnx_path = "models/ch_PP-OCRv4_rec_infer.onnx"
-        if os.path.exists(onnx_path):
-            rec_session = ort.InferenceSession(onnx_path, opts, providers=['CPUExecutionProvider'])
-        else:
-            rec_session = ort.InferenceSession(onnx_path, opts, providers=['CPUExecutionProvider'])
-    except Exception:
-        onnx_ready = False
+    # 模型與字典相對於本檔案，避免從其他工作目錄啟動時找不到資源。
+    from pathlib import Path
+    model_dir = Path(__file__).resolve().parent / "models"
+    dict_path = model_dir / "ppocr_keys_v1.txt"
+    onnx_path = model_dir / "ch_PP-OCRv4_rec_infer.onnx"
+    onnx_ready = False
+    char_list = []
+    rec_session = None
+    if dict_path.is_file() and onnx_path.is_file():
+        try:
+            import onnxruntime as ort
+            opts = ort.SessionOptions()
+            opts.intra_op_num_threads = 1
+            opts.inter_op_num_threads = 1
+            with dict_path.open("r", encoding="utf-8") as f:
+                char_list = ["blank"] + [line.strip() for line in f] + [" "]
+            rec_session = ort.InferenceSession(str(onnx_path), opts, providers=["CPUExecutionProvider"])
+            onnx_ready = True
+        except Exception as exc:
+            print(">>> [OCR] ONNX 載入失敗，改用 Tesseract 備援:", exc)
     else:
-        onnx_ready = True
+        print(">>> [OCR] 模型或字典不存在，改用 Tesseract 備援")
 
     while True:
         data = input_queue.get()
