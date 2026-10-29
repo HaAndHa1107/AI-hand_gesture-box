@@ -396,7 +396,7 @@ if __name__ == "__main__":
                                 gestures.get(name, False)
                                 for name in (
                                     "mode_switch", "ok", "lock_sign",
-                                    "palm", "eraser", "three_up"
+                                    "palm", "eraser", "three_up", "rock_sign"
                                 )
                             )
                             if menu_click_held:
@@ -634,17 +634,21 @@ if __name__ == "__main__":
 
                                 # 不使用 continue，讓本幀照常更新 OpenCV 視窗
 
+                            # 🤘 網頁上一頁：辨識與計時由 browser_navigation.py 處理。
+                            # 先處理返回手勢，再決定是否允許滑鼠操作，避免誤點。
+                            did_go_back = browser_back.update(gestures, lm, w, now)
+                            if did_go_back or browser_back.block_palm_hold:
+                                palm_hold_start_time = None
+
                             # =====================================
-                            # 一般滑鼠操作
+                            # 一般滑鼠操作（🤘 期間不移動或點擊）
                             # =====================================
                             if (
                                 current_state == STATE_STREAMING
                                 and lm
-                                and not gestures.get(
-                                    "mode_switch"
-                                )
+                                and not gestures.get("mode_switch")
+                                and not gestures.get("rock_sign")
                             ):
-
                                 mouse_mode.process(
                                     gestures,
                                     lm,
@@ -652,12 +656,6 @@ if __name__ == "__main__":
                                     h,
                                     display_frame
                                 )
-
-                            # 網頁返回手勢交由 browser_navigation.py 處理。
-                            # 揮動後暫停長按手掌計時，直到手掌收起。
-                            did_go_back = browser_back.update(gestures, lm, w, now)
-                            if did_go_back or browser_back.block_palm_hold:
-                                palm_hold_start_time = None
 
                             # =====================================
                             # 張開手掌返回主選單（原有功能保留）

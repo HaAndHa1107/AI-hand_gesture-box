@@ -43,6 +43,13 @@ def analyze_hand_gestures(lm, base):
     is_backspace = is_pinky_up and not is_index_up and not is_middle_up and not is_ring_up
     is_three_up = is_index_up and is_middle_up and is_ring_up and not is_pinky_up
 
+    # 🤘 搖滾手勢：食指、小指伸直；拇指、中指、無名指收起。
+    # 與 🤙 暫停手勢不同：🤙 的食指收起、拇指伸出。
+    is_rock_sign = (
+        is_index_up and is_pinky_up
+        and not is_thumb_up and not is_middle_up and not is_ring_up
+    )
+
     is_mode_switch = (
         is_thumb_up and not is_index_up and not is_middle_up
         and not is_ring_up and not is_pinky_up
@@ -63,6 +70,7 @@ def analyze_hand_gestures(lm, base):
         "three_up": is_three_up,
         "mode_switch": is_mode_switch,
         "lock_sign": is_lock_sign,
+        "rock_sign": is_rock_sign,
         "palm": is_palm,
         "fist": is_fist,
         "mouse_click": is_mouse_left_click

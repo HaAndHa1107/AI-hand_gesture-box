@@ -1,63 +1,56 @@
-"""網頁上一頁：張開手掌向左揮。僅由 main 的網頁模式呼叫。"""
-from collections import deque
+"""Chromium 上一頁：🤘（食指與小指伸直，其餘手指收起）保持一段時間。"""
 import pyautogui
 
 
 class BrowserBackGesture:
-    def __init__(self, min_distance=0.12, max_duration=1.0, cooldown=1.2):
-        self.min_distance = min_distance
-        self.max_duration = max_duration
+    """只管理返回手勢的計時、單次觸發與鍵盤快捷鍵。"""
+
+    def __init__(self, hold_duration=0.8, cooldown=1.2):
+        self.hold_duration = hold_duration
         self.cooldown = cooldown
-        self.points = deque()
+        self.hold_start = None
         self.last_trigger = float('-inf')
+        self.armed = True
+        # 保留舊版 main.py 使用的屬性名稱，以避免介面不相容。
         self.block_palm_hold = False
-        self.last_palm_seen = float('-inf')
-        self.last_debug = float('-inf')
 
     def reset(self):
-        self.points.clear()
+        self.hold_start = None
+        self.armed = True
         self.block_palm_hold = False
-        self.last_palm_seen = float('-inf')
 
     def update(self, gestures, landmarks, frame_width, now):
-        """成功送出 Alt+Left 回傳 True；左移方向依已水平翻轉的影像。"""
-        palm = bool(gestures.get('palm'))
-        wrist = landmarks.get(0)
-        if frame_width <= 0 or wrist is None:
-            self.reset()
+        """每影格呼叫；成功送出上一頁快捷鍵時回傳 True。
+
+        landmarks/frame_width 保留作為與舊版呼叫介面相容的參數。
+        """
+        rock = bool(gestures.get('rock_sign', False))
+        if not rock:
+            self.hold_start = None
+            self.armed = True
+            self.block_palm_hold = False
             return False
 
-        if not palm:
-            # 揮動時短暫丟失手掌分類，不立刻清空軌跡。
-            if now - self.last_palm_seen > 0.25:
-                self.points.clear()
-                self.block_palm_hold = False
-            return False
-
-        self.last_palm_seen = now
-        if self.block_palm_hold:
-            return False
-
-        x = wrist[0] / frame_width
-        self.points.append((now, x))
-        while self.points and now - self.points[0][0] > self.max_duration:
-            self.points.popleft()
-
-        if now - self.last_trigger < self.cooldown or len(self.points) < 2:
-            return False
-
-        # 起點必須是當前點之前的紀錄，避免單幀抖動造成誤判。
-        start_x = max(p[1] for p in list(self.points)[:-1])
-        distance = start_x - x
-        if now - self.last_debug > 0.7 and distance > 0.04:
-            print(f'>>> [返回手勢] 偵測左移 {distance:.1%}（門檻 {self.min_distance:.0%}）', flush=True)
-            self.last_debug = now
-        if distance < self.min_distance:
-            return False
-
-        print('>>> [返回手勢] 已觸發 Alt+Left', flush=True)
-        pyautogui.hotkey('alt', 'left', interval=0.08)
-        self.last_trigger = now
+        # 偵測到搖滾手勢期間，禁止與手掌長按計時互相干擾。
         self.block_palm_hold = True
-        self.points.clear()
+        if not self.armed:
+            return False
+        if self.hold_start is None:
+            self.hold_start = now
+            return False
+        if now - self.hold_start < self.hold_duration:
+            return False
+        if now - self.last_trigger < self.cooldown:
+            return False
+
+        try:
+            pyautogui.hotkey('alt', 'left', interval=0.08)
+        except Exception as exc:
+            print(f'>>> [返回手勢] Alt+Left 發送失敗：{exc}', flush=True)
+            self.hold_start = now  # 失敗後重新計時，避免每幀重試
+            return False
+
+        self.last_trigger = now
+        self.armed = False  # 必須放開搖滾手勢，才能再次返回
+        print('>>> [返回手勢] 🤘 維持 0.8 秒，已送出 Alt+Left', flush=True)
         return True
